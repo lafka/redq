@@ -1,0 +1,10 @@
+{application, redq, [
+	  {description, "Multi-channel queue wrapped around Redis"}
+	, {vsn, "0.1.0"}
+	, {registered, []}
+	, {applications, [kernel, stdlib, eredis, pooler]}
+	, {env, [
+		  {pool,     {eredis, start_link, []}}
+		, {pool_sub, {eredis_sub, start_link, []}}
+	]}
+]}.
