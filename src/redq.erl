@@ -37,11 +37,12 @@ push(Queue, Event) ->
 push([NS | Resource], Event, _Opts) ->
 	Queue = join(Resource, <<$:>>),
 	Key = key(queue, NS, Queue),
-
-	[{ok, _}, {ok, _}] = eredis:qp(get_pid(), [
+	{Pid, Cont} = get_pid(),
+	[{ok, _}, {ok, _}] = eredis:qp(Pid, [
 		  ["SADD", Key, Event]
 		, ["PUBLISH", Key, Event]
 	]),
+	_ = Cont(Pid),
 
 	ok.
 
@@ -60,7 +61,7 @@ take(Chan, Opts) ->
 	[NS, _Chan] = binary:split(Chan, <<$/>>),
 
 	%% @todo 2013-09-09; lafka - validate that items are removed
-	with_queue(get_pid(), [NS, Chan], fun(Pid, Queue) ->
+	with_queue([NS, Chan], fun(Pid, Queue) ->
 		{ok, Items0} = eredis:q(Pid, ["SMEMBERS", key(queue, NS, Queue)]),
 		{ok, Items} = return_items(Items0, Opts),
 		_ = eredis:qp(Pid, [ ["SREM", key(queue, NS, Queue), I] || I <- Items]),
@@ -80,7 +81,7 @@ peek(Queue) ->
 peek(Chan, Opts) ->
 	[NS, _Chan] = binary:split(Chan, <<$/>>),
 
-	with_queue(get_pid(), [NS, Chan], fun(Pid, Queue) ->
+	with_queue([NS, Chan], fun(Pid, Queue) ->
 		{ok, Items} = eredis:q(Pid, ["SMEMBERS", key(queue, NS, Queue)]),
 		return_items(Items, Opts)
 	end).
@@ -92,7 +93,7 @@ peek(Chan, Opts) ->
 flush(Chan) ->
 	[NS, _Chan] = binary:split(Chan, <<$/>>),
 
-	with_queue(get_pid(), [NS, Chan], fun(Pid, Queue) ->
+	with_queue([NS, Chan], fun(Pid, Queue) ->
 		{ok, Items} = eredis:q(Pid, ["SMEMBERS", key(queue, NS, Queue)]),
 		_ = eredis:qp(Pid, [ ["SREM", key(queue, NS, Queue), I] || I <- Items]),
 		{ok, Items}
@@ -105,7 +106,7 @@ flush(Chan) ->
 remove(Chan, Event) ->
 	[NS, _Chan] = binary:split(Chan, <<$/>>),
 
-	with_queue(get_pid(), [NS, Chan], fun(Pid, Queue) ->
+	with_queue([NS, Chan], fun(Pid, Queue) ->
 		{ok, _} = eredis:q(Pid, ["SREM", key(queue, NS, Queue), Event]),
 		ok
 	end).
@@ -127,12 +128,21 @@ consume([NS | Resource], Opts) ->
 	lists:member(proxy, Opts) andalso begin
 		Parent = self(),
 		spawn(fun() ->
-			{ok, SubPid} = add_subscription([Chan, key(queue, NS, Queue)]),
+			{ok, SubPid, Cont} = add_subscription([Chan, key(queue, NS, Queue)]),
+
+			P = spawn(fun() ->
+				Ref = erlang:monitor(process, SubPid),
+				receive
+					{'DOWN', Ref, _, _, _} -> Cont(SubPid);
+					{done, SubPid} -> Cont(SubPid)
+				end
+			end),
 
 			{ok, Items} = peek(Chan, [{slice, all}]),
 			_ = [Parent ! {event, Chan, E} || E <- Items],
 
-			consumer(SubPid, Chan, Parent)
+			consumer(SubPid, Chan, Parent),
+			P ! {done, SubPid}
 		end)
 	end,
 
@@ -143,8 +153,10 @@ consume([NS | Resource], Opts) ->
 			false ->
 				[] end,
 
-	eredis:qp(get_pid(), [
+	{Pid, Cont} = get_pid(),
+	eredis:qp(Pid, [
 		["HSET", key(channels, NS, []), Chan, Queue] | Transaction]),
+	_ = Cont(Pid),
 
 	{ok, to_binary(Chan)}.
 
@@ -160,7 +172,7 @@ consumer(Pid, Chan, Proxy) ->
 
 add_subscription(Channels) ->
 	Wildcard = nomatch =/= binary:match(iolist_to_binary(Channels), <<$*>>),
-	Sub = get_sub_pid(),
+	{Sub, Cont} = get_sub_pid(),
 
 	ok = eredis_sub:controlling_process(Sub),
 
@@ -172,22 +184,26 @@ add_subscription(Channels) ->
 	[receive {subscribed, K, Sub} -> eredis_sub:ack_message(Sub) end
 		|| K <- Channels],
 
-	{ok, Sub}.
+	{ok, Sub, Cont}.
 
 
 %% Private
 get_pid() ->
-	{ok, {M, F, Args}} = application:get_env(redq, pool),
-	case erlang:apply(M, F, Args) of
-		{ok, P} -> P;
-		Ret -> Ret
-	end.
+	get_pid2(redq, pool).
 
 get_sub_pid() ->
-	{ok, {M, F, Args}} = application:get_env(redq, pool_sub),
-	case erlang:apply(M, F, Args) of
-		{ok, P} -> P;
-		Ret -> Ret
+	get_pid2(redq, pool_sub).
+
+get_pid2(App, Key) ->
+	{{M, F, A}, Return} = case application:get_env(App, Key) of
+		{ok, [{M1, F1, A1}, {M2, F2, A2}]} ->
+			{{M1, F1, A1}, fun(P) -> erlang:apply(M2, F2, A2 ++ [P]) end};
+		{ok, {M1, F1, A1}} ->
+			{{M1, F1, A1}, fun(_) -> ok end} end,
+
+	case erlang:apply(M, F, A) of
+		{ok, P} -> {P, Return};
+		P when is_pid(P) -> {P, Return}
 	end.
 
 gen_chan_id(NS) ->
@@ -218,12 +234,15 @@ to_binary(P) when is_list(P) -> list_to_binary(P);
 to_binary(P) when is_integer(P) -> to_binary(integer_to_list(P));
 to_binary(P) when is_binary(P) -> P.
 
-with_queue(Pid, [NS, Chan], Fun) ->
+with_queue([NS, Chan], Fun) ->
+	{Pid, Cont} = get_pid(),
 	case eredis:q(Pid, ["HGET", key(channels, NS, []), Chan]) of
 		{ok, undefined} ->
+			_ = Cont(Pid),
 			{error, notfound};
 
 		{ok, Queue} ->
+			_ = Cont(Pid),
 			Fun(Pid, Queue)
 	end.
 
