@@ -130,19 +130,12 @@ consume([NS | Resource], Opts) ->
 		spawn(fun() ->
 			{ok, SubPid, Cont} = add_subscription([Chan, key(queue, NS, Queue)]),
 
-			P = spawn(fun() ->
-				Ref = erlang:monitor(process, SubPid),
-				receive
-					{'DOWN', Ref, _, _, _} -> Cont(SubPid);
-					{done, SubPid} -> Cont(SubPid)
-				end
-			end),
+			_ = create_pid_monitor(Parent, SubPid, Cont),
 
 			{ok, Items} = peek(Chan, [{slice, all}]),
 			_ = [Parent ! {event, Chan, E} || E <- Items],
 
-			consumer(SubPid, Chan, Parent),
-			P ! {done, SubPid}
+			consumer(SubPid, Chan, Parent)
 		end)
 	end,
 
@@ -205,6 +198,14 @@ get_pid2(App, Key) ->
 		{ok, P} -> {P, Return};
 		P when is_pid(P) -> {P, Return}
 	end.
+
+create_pid_monitor(Parent, Pid, Cont) ->
+	spawn(fun() ->
+		Ref = erlang:monitor(process, Parent),
+		receive {'DOWN', Ref, _, _, _} ->
+				Cont(Pid)
+		end
+	end).
 
 gen_chan_id(NS) ->
 	random:seed(os:timestamp()),
