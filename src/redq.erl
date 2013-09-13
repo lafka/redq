@@ -173,15 +173,20 @@ add_subscription(Channels) ->
 
 	ok = eredis_sub:controlling_process(Sub),
 
-	if
-		Wildcard -> ok = eredis_sub:psubscribe(Sub, Channels);
-		true     -> ok = eredis_sub:subscribe(Sub, Channels)
+	Cont2 = if
+		Wildcard ->
+			ok = eredis_sub:psubscribe(Sub, Channels),
+			fun(P) -> eredis_sub:punsubscribe(P, Channels), Cont(P) end;
+
+		true ->
+			ok = eredis_sub:subscribe(Sub, Channels),
+			fun(P) -> eredis_sub:unsubscribe(P, Channels), Cont(P) end
 	end,
 
 	[receive {subscribed, K, Sub} -> eredis_sub:ack_message(Sub) end
 		|| K <- Channels],
 
-	{ok, Sub, Cont}.
+	{ok, Sub, Cont2}.
 
 
 %% Private
@@ -312,7 +317,7 @@ multi_consumer_test() ->
 			Parent ! N,
 			receive {event, LQ, E} -> Parent ! {N, E} end
 		end)
-	end, Consumers = lists:seq(1, 5)),
+	end, Consumers = lists:seq(1, 250)),
 
 
 	?assertEqual(ok, redq:push(Queue, E1)),
