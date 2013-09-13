@@ -132,8 +132,12 @@ consume([NS | Resource], Opts) ->
 
 			_ = create_pid_monitor(Parent, SubPid, Cont),
 
-			{ok, Items} = peek(Chan, [{slice, all}]),
-			_ = [Parent ! {event, Chan, E} || E <- Items],
+			case peek(Chan, [{slice, all}]) of
+				{ok, Items} ->
+					_ = [Parent ! {event, Chan, E} || E <- Items];
+				_ ->
+					ok
+			end,
 
 			consumer(SubPid, Chan, Parent)
 		end)
