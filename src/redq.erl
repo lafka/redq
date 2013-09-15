@@ -1,7 +1,7 @@
 -module(redq).
 
 -export([
-	  push/2
+	  push/2, push/3
 	, consume/1, consume/2
 	, peek/1, peek/2
 	, take/1, take/2
@@ -34,14 +34,21 @@ push(Queue, Event) ->
 -spec push(queue(), event(), push_opts()) ->
 	ok | {error, Err} when Err :: term().
 
-push([NS | Resource], Event, _Opts) ->
+push([NS | Resource], Event, Opts) ->
 	Queue = join(Resource, <<$:>>),
 	Key = key(queue, NS, Queue),
+
 	{Pid, Cont} = get_pid(),
-	[{ok, _}, {ok, _}] = eredis:qp(Pid, [
-		  ["SADD", Key, Event]
-		, ["PUBLISH", Key, Event]
-	]),
+
+	case lists:member(volatile, Opts) of
+		true ->
+			{ok, _} = eredis:q(Pid, ["PUBLISH", Key, Event]);
+
+		false ->
+			[{ok, _}, {ok, _}] = eredis:qp(Pid, [["SADD", Key, Event]
+				, ["PUBLISH", Key, Event]])
+	end,
+
 	_ = Cont(Pid),
 
 	ok.
