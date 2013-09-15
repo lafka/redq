@@ -35,19 +35,24 @@ push(Queue, Event) ->
 	ok | {error, Err} when Err :: term().
 
 push([NS | Resource], Event, Opts) ->
-	Queue = join(Resource, <<$:>>),
-	Key = key(queue, NS, Queue),
-
-	{Pid, Cont} = get_pid(),
-
-	case lists:member(volatile, Opts) of
+	Queues = case lists:member(broadcast, Opts) of
 		true ->
-			{ok, _} = eredis:q(Pid, ["PUBLISH", Key, Event]);
+			Root0 = key(queue, NS, <<>>),
+			Root  = binary:part(Root0, 0, size(Root0) - 1),
+			lists:foldl(fun(A, [B|_] = Acc) ->
+				[join([B, A], <<$:>>) | Acc]
+			end, [Root], Resource);
 
 		false ->
-			[{ok, _}, {ok, _}] = eredis:qp(Pid, [["SADD", Key, Event]
-				, ["PUBLISH", Key, Event]])
+			[key(queue, NS, join(Resource, <<$:>>))] end,
+
+	Expand = case lists:member(volatile, Opts) of
+		true  -> fun(Q, Acc) -> [["PUBLISH", Q, Event] | Acc] end;
+		false -> fun(Q, Acc) -> [["SADD", Q, Event], ["PUBLISH", Q, Event] | Acc] end
 	end,
+
+	{Pid, Cont} = get_pid(),
+	[{ok, _} | _] = eredis:qp(Pid, lists:foldl(Expand, [], Queues)),
 
 	_ = Cont(Pid),
 
@@ -333,4 +338,27 @@ multi_consumer_test() ->
 
 	?assertEqual({ok, [E1]}, redq:take(Q, [])).
 
+tree_publish_test() ->
+	P = self(),
+	lists:foldr(fun
+		(_, []) -> ok;
+		(_, [_ | NAcc] = Acc) ->
+		spawn(fun() ->
+			{ok, Q} = redq:consume(lists:reverse(Acc), [proxy]),
+			P ! {ok, length(Acc)},
+			receive {event, Q, E} ->
+				P  ! {ok, length(Acc)}
+			end
+		end),
+		NAcc
+	end, lists:reverse(["x", "y", "z", "x"]), lists:seq(1, 4)),
+
+	[receive {ok, N} -> ok end || N <- lists:seq(1,4)],
+
+	ok = redq:push(["x", "y", "z", "x"], "e", [volatile, broadcast]),
+
+	?assertEqual([ok,ok,ok],
+		[receive {ok, N} -> ok end || N <- lists:seq(2, 4)]).
+
 -endif.
+
