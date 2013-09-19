@@ -215,7 +215,7 @@ get_pid2(App, Key) ->
 		{ok, {M1, F1, A1}} ->
 			{{M1, F1, A1}, fun(_) -> ok end} end,
 
-	case erlang:apply(M, F, A) of
+	try erlang:apply(M, F, A) of
 		{ok, P} ->
 			{P, Return};
 
@@ -224,6 +224,8 @@ get_pid2(App, Key) ->
 
 		_ ->
 			false
+	catch
+		A:B -> {error, {A, B}}
 	end.
 
 create_pid_monitor(Parent, Pid, Cont) ->
