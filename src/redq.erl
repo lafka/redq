@@ -258,7 +258,8 @@ join([[] | Rest], Sep, Acc) ->
 join([P | Rest], Sep, Acc) ->
 	join(Rest, Sep, <<Acc/binary, Sep/binary, ((to_binary(P)))/binary>>).
 
-to_binary(P) when is_list(P) -> list_to_binary(P);
+to_binary(P) when is_list(P) -> iolist_to_binary(P);
+to_binary(P) when is_atom(P) -> atom_to_binary(P, unicode);
 to_binary(P) when is_integer(P) -> to_binary(integer_to_list(P));
 to_binary(P) when is_binary(P) -> P.
 
