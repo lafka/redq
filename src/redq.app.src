@@ -2,7 +2,7 @@
 	  {description, "Multi-channel queue wrapped around Redis"}
 	, {vsn, "0.1.0"}
 	, {registered, []}
-	, {applications, [kernel, stdlib, eredis, pooler]}
+	, {applications, [kernel, stdlib, eredis]}
 	, {mod, {redq_app, []}}
 	, {env, [
 		  {pool,     {eredis, start_link, []}}
