@@ -3,6 +3,7 @@
 	, {vsn, "0.1.0"}
 	, {registered, []}
 	, {applications, [kernel, stdlib, eredis, pooler]}
+	, {mod, {redq_app, []}}
 	, {env, [
 		  {pool,     {eredis, start_link, []}}
 		, {pool_sub, {eredis_sub, start_link, []}}

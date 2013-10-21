@@ -3,6 +3,7 @@
 -export([
 	  push/2, push/3
 	, consume/1, consume/2
+	, destroy/1
 	, peek/1, peek/2
 	, take/1, take/2
 	, flush/1
@@ -135,25 +136,7 @@ consume(Queue) ->
 	{ok, channel()} | {error, Err} when Err :: term().
 
 consume([NS | Resource], Opts) ->
-	{Queue, Chan} = {join(Resource, <<$:>>), gen_chan_id(NS)},
-
-	lists:member(proxy, Opts) andalso begin
-		Parent = self(),
-		spawn(fun() ->
-			{ok, SubPid, Cont} = add_subscription([Chan, key(queue, NS, Queue)]),
-
-			_ = create_pid_monitor(Parent, SubPid, Cont),
-
-			case peek(Chan, [{slice, all}]) of
-				{ok, Items} ->
-					_ = [Parent ! {event, Chan, E} || E <- Items];
-				_ ->
-					ok
-			end,
-
-			consumer(SubPid, Chan, Parent)
-		end)
-	end,
+	{Queue, Chan} = {join(Resource, <<$:>>), redq_chan:id(NS)},
 
 	Transaction = case lists:keyfind(resume, 1, Opts) of
 			{resume, OldChan} ->
@@ -165,51 +148,39 @@ consume([NS | Resource], Opts) ->
 	{Pid, Cont} = get_pid(),
 	eredis:qp(Pid, [
 		["HSET", key(channels, NS, []), Chan, Queue] | Transaction]),
+
 	_ = Cont(Pid),
+
+	maybe_add_proxy(Chan, [key(queue, NS, Queue)], Opts),
 
 	{ok, to_binary(Chan)}.
 
+-spec destroy(channel()) -> ok | {error, Error} when Error :: term().
 
-consumer(Pid, Chan, Proxy) ->
-	receive {message, _Queue, Event, Pid2} ->
-		ok = eredis_sub:ack_message(Pid2),
-
-		is_pid(Proxy) andalso (Proxy ! {event, Chan, Event}),
-
-		consumer(Pid, Chan, Proxy)
-	end.
-
-add_subscription(Channels) ->
-	Wildcard = nomatch =/= binary:match(iolist_to_binary(Channels), <<$*>>),
-	{Sub, Cont} = get_sub_pid(),
-
-	ok = eredis_sub:controlling_process(Sub),
-
-	Cont2 = if
-		Wildcard ->
-			ok = eredis_sub:psubscribe(Sub, Channels),
-			fun(P) -> eredis_sub:punsubscribe(P, Channels), Cont(P) end;
-
-		true ->
-			ok = eredis_sub:subscribe(Sub, Channels),
-			fun(P) -> eredis_sub:unsubscribe(P, Channels), Cont(P) end
-	end,
-
-	[receive {subscribed, K, Sub} -> eredis_sub:ack_message(Sub) end
-		|| K <- Channels],
-
-	{ok, Sub, Cont2}.
+destroy(Chan) ->
+	redq_chan:destroy(Chan).
 
 
 %% Private
+maybe_add_proxy(Chan, AChans, Opts) ->
+	Parent = case lists:keyfind(proxy,1, Opts) of
+		{proxy, Pid} ->
+			Pid;
+
+		false ->
+			lists:member(proxy, Opts) andalso self()
+	end,
+
+
+	if is_pid(Parent) ->
+			redq_chan:new(Chan, AChans, Parent, Opts);
+
+		true ->
+			false
+	end.
+
 get_pid() ->
-	get_pid2(redq, pool).
-
-get_sub_pid() ->
-	get_pid2(redq, pool_sub).
-
-get_pid2(App, Key) ->
-	{{M, F, A}, Return} = case application:get_env(App, Key) of
+	{{M, F, A}, Return} = case application:get_env(redq, pool) of
 		{ok, [{M1, F1, A1}, {M2, F2, A2}]} ->
 			{{M1, F1, A1}, fun(P) -> erlang:apply(M2, F2, A2 ++ [P]) end};
 		{ok, {M1, F1, A1}} ->
@@ -227,20 +198,6 @@ get_pid2(App, Key) ->
 	catch
 		A:B -> {error, {A, B}}
 	end.
-
-create_pid_monitor(Parent, Pid, Cont) ->
-	spawn(fun() ->
-		Ref = erlang:monitor(process, Parent),
-		receive {'DOWN', Ref, _, _, _} ->
-				Cont(Pid)
-		end
-	end).
-
-gen_chan_id(NS) ->
-	random:seed(os:timestamp()),
-	join([NS,
-		integer_to_list(random:uniform(16#FFFFFFFFFFFFFFFFFFFFF), 36)]
-		, <<$/>>).
 
 key(channels, Root, _) ->
 	<<(to_binary(Root))/binary, ":channels">>;
@@ -291,41 +248,78 @@ return_items(Items, Opts) ->
 -ifdef(TEST).
 
 -include_lib("eunit/include/eunit.hrl").
+%%
+%% There are 2 reasons to clean:
+%% a) Since we resume the queue, we have to note that the `take/1`
+%%    cannot remove the items from the erlang message queue. But you
+%%    should not resume a queue created in the same process.
+%% b) Push sends a message to two channels, the queue itself and
+%%    volatile channel. this means everything gets delivered twice
+%%
+%% Sorry for the mess :)
+cleanerlmsg() ->
+	case receive {event, _, _} -> ok after 0 -> fail end of
+		fail -> ok;
+		ok -> cleanerlmsg()
+	end.
 
 consumer_test() ->
-	_ = application:load(redq),
+	P = self(),
+	spawn(fun() ->
+		_ = [application:ensure_started(X) || X <- [eredis, redq]],
 
-	Queue = [<<"a">>, <<"b">>, <<"c">>],
-	{E1, E2, E3} = {<<"e-1">>, <<"e-2">>, <<"e-3">>},
+		Queue = [<<"a">>, <<"b">>, <<"c">>],
+		{E1, E2, E3} = {<<"e-1">>, <<"e-2">>, <<"e-3">>},
 
-	{ok, Q} = redq:consume(Queue, [proxy]),
-	?assertEqual(ok, redq:push(Queue, E1)),
+		{ok, Q} = redq:consume(Queue, [proxy]),
+		?assertEqual(ok, redq:push(Queue, E1)),
 
-	?assertEqual({event, Q, E1}
-		, receive E -> E after 1000 -> timeout end),
+		?assertEqual({event, Q, E1}
+			, receive E -> E after 1000 -> timeout end),
 
-	?assertEqual(ok, redq:push(Queue, E2)),
-	?assertEqual(ok, redq:push(Queue, E3)),
+		{ok, Q2} = redq:consume(Queue, [{resume, Q}, proxy]),
 
-	%?assertEqual(ok, redq:close(Q)),
+		?assertEqual(ok, redq:push(Queue, E2)),
+		?assertEqual(ok, redq:push(Queue, E3)),
 
-	{ok, Q2} = redq:consume(Queue, [{resume, Q}, proxy]),
+		?assertEqual({ok, [E1]}, redq:peek(Q2)),
+		?assertEqual({ok, [E1]}, redq:take(Q2)),
 
-	?assertEqual({ok, [E1]}, redq:peek(Q2)),
-	?assertEqual({ok, [E1]}, redq:take(Q2)),
+		receive {event, Q2, <<"e-2">>} = E ->
+			?assertEqual({event, Q2, <<"e-2">>}, E),
+			?assertEqual(ok, redq:remove(Q2, E2))
+		end,
 
-	%% First event is transmitted multiple times since take cannot
-	%% remove items from message queue, therefor it's important to
-	%% only rely on 'proxy' or 'take'
-	receive {event, Q2, <<"e-2">>} = E ->
-		?assertEqual({event, Q2, <<"e-2">>}, E),
-		?assertEqual(ok, redq:remove(Q2, E2))
-	end,
+		?assertEqual({ok, [E3]}, redq:flush(Q2)),
 
-	?assertEqual({ok, [E3]}, redq:flush(Q2)).
+		?assertEqual(ok, redq:destroy(Q2)),
+
+		P ! ok
+	end),
+
+	receive ok -> ok end.
+
+
+consume_wildcard_test() ->
+	P = self(),
+	spawn(fun() ->
+		_ = [application:ensure_started(X) || X <- [eredis, redq]],
+
+		Queue = [<<"a">>, <<"*">>],
+		{ok, Q} = redq:consume(Queue, [proxy]),
+
+		?assertEqual(ok, redq:push([<<"a">>, <<"b">>], <<"c">>)),
+		receive {event, _, _} = E -> ?assertEqual(E, {event, Q, <<"c">>}) end,
+
+		?assertEqual(ok, redq:destroy(Q)),
+
+		P ! ok
+	end),
+
+	receive ok -> ok end.
 
 multi_consumer_test() ->
-	_ = application:load(redq),
+	_ = [application:ensure_started(X) || X <- [eredis, redq]],
 
 	Queue = [<<"d">>, <<"e">>, <<"f">>],
 	E1 = <<"m-e-1">>,
@@ -333,21 +327,51 @@ multi_consumer_test() ->
 
 	Parent = self(),
 	lists:foreach(fun(N) ->
-		spawn_link(fun() ->
-			{ok, LQ} = redq:consume(Queue, [proxy]),
-			Parent ! N,
-			receive {event, LQ, E} -> Parent ! {N, E} end
-		end)
-	end, Consumers = lists:seq(1, 250)),
+		sync_spawn(fun() ->
+			Child = spawn_link(fun() ->
+				receive
+					{event, LQ, E} ->
+						Parent ! {N, E, LQ},
+						redq:destroy(LQ)
+				end
+			end),
+			{ok, _} = redq:consume(Queue, [{proxy, Child}])
 
+		end)
+	end, Consumers = lists:seq(1, 35)),
 
 	?assertEqual(ok, redq:push(Queue, E1)),
-	Resp  = [receive {N, E1} -> ok after 200 -> {error, N} end || N <- Consumers],
-	?assertEqual([ok || _ <- Consumers], Resp),
 
-	?assertEqual({ok, [E1]}, redq:take(Q, [])).
+	getall(Consumers, E1),
+
+	?assertEqual({ok, [E1]}, redq:take(Q, [])),
+
+	%% We used consume/1, so no proxy process was created - destroy
+	%% has no process to destroy so we get `notfound`
+	?assertEqual({error, notfound}, redq:destroy(Q)).
+
+sync_spawn(Fun) ->
+	Ref = make_ref(),
+	Parent = self(),
+	spawn(fun() ->
+		Parent ! {Ref, Fun()}
+	end),
+
+	receive
+		{Ref, Ret} -> Ret
+	end.
+
+getall([], _E) -> ok;
+getall(Acc, E) ->
+	receive {N, E, _Chan} ->
+		getall(lists:delete(N, Acc), E)
+	end.
 
 tree_publish_test() ->
+	_ = [application:ensure_started(X) || X <- [eredis, redq]],
+
+	cleanerlmsg(),
+
 	P = self(),
 	lists:foldr(fun
 		(_, []) -> ok;
@@ -355,8 +379,9 @@ tree_publish_test() ->
 		spawn(fun() ->
 			{ok, Q} = redq:consume(lists:reverse(Acc), [proxy]),
 			P ! {ok, length(Acc)},
-			receive {event, Q, E} ->
-				P  ! {ok, length(Acc)}
+			receive {event, Q, _E} ->
+				P  ! {ok, length(Acc)},
+				redq:destroy(Q)
 			end
 		end),
 		NAcc
