@@ -277,6 +277,7 @@ consumer_test() ->
 		?assertEqual({event, Q, E1}
 			, receive E -> E after 1000 -> timeout end),
 
+		ok = redq:destroy(Q),
 		{ok, Q2} = redq:consume(Queue, [{resume, Q}, proxy]),
 
 		?assertEqual(ok, redq:push(Queue, E2)),

@@ -7,7 +7,7 @@ Features:
 + Use pointers to resume previous connection
 + Multiple consumers on same data
 
-**WARNING** Highly experimental, docs/examples are not fully working
+**WARNING** Highly experimental, docs/examples may not work 100%
 or even aligned with the current API. Use at own risk.
 
 ### Overview
@@ -16,7 +16,7 @@ or even aligned with the current API. Use at own risk.
 `queue` -> A resource containing set of events
 
 `<ns>:queue:<resource>` -> set containing messages to be consumed
-`<ns>:chans`            -> Hash defining channel -> queue lookup
+`<ns>:channels`            -> Hash defining channel -> queue lookup
 
 **Push:**
 When pushing an event the following happens:
@@ -30,11 +30,20 @@ When pushing an event the following happens:
 + call `remove` for each element in return from `peek` call
 
 **Consume:**
-+ Maybe: remove `<ns>:chans[<prev-chan>]`
-+ set `<ns>:chans[<new-chan>] = <resource>`
-+ subscribe to `<ns>:queue:<resource>`
++ Maybe: remove `<ns>:channels[<prev-chan>]`
++ set `<ns>:channels[<new-chan>] = <resource>`
++ subscribe to `<ns>:queue:<resource>` (supervised process if `proxy` is used)
+
+**Destroy:**
++ When chansumer was called with `proxy`, the supervised process
+  running on local node will be terminated.
+
 
 ### Example
+
+**Note:** Considering the code is alpha these examples may not work as
+expected or even work at all. Refer to tests in `redq.erl` for working
+examples.
 
 ```erlang
 Resource = [<<"root">>, <<"group-1">>, <<"resource">>],
@@ -44,29 +53,29 @@ ok = redq:push(Resource, <<"event-1">>),
 %% Subscribe to a specific resource, use `receive` option to get items
 %% as messages.
 {ok, Q} = redq:consume(Resource, [proxy]),
-% {ok, <<"Dh7c8VHZhH9642l8gW0">>}
+% => {ok, <<"Dh7c8VHZhH9642l8gW0">>}
 
 %% Receive a single event without removing it
 receive {event, Q, Event} -> {recv, Event} end,
-% {recv, <<"event-1">>}
+% => {recv, <<"event-1">>}
 
 ok = redq:push(Resource, <<"event-2">>),
 ok = redq:push(Resource, <<"event-3">>),
 
 %% Close consumer; this only closes redis connection, no data will be
 %% removed data and additional data may be added to the queue
-ok = redq:close(Q),
+ok = redq:destroy(Q),
 
 %% Take over from last position, creates new identifier Q2
-{ok, Q2} = redq:consume(Resource, [{resume, Q}]),
-% {ok, <<"Dh7dGJabdgAKMcW8EAW">>}
+{ok, Q2} = redq:consume(Resource, [{resume, Q}, proxy]),
+% => {ok, <<"Dh7dGJabdgAKMcW8EAW">>}
 
 % See head of queue without removing it
 {ok, _Item} = redq:peek(Q2),
-% {ok, [<<"event-1">>]}
+% => {ok, [<<"event-1">>]}
 
-% Retreive and remove the head of the queue, blocks until an element
-% have been pushed to queue.
+% Retreive and remove the head of the queue, returns {ok, []} if queue
+% is empty
 {ok, [<<"event-1">>]} = redq:take(Q2),
 
 receive
@@ -75,7 +84,7 @@ receive
 		ok = redq:remove(Q2, AnotherEvent),
 		{recv, AnotherEvent}
 end,
-% {recv, <<"event-2">>}
+% => {recv, <<"event-2">>}
 
 %% Give us all the members and remove them from queue
 {ok, [<<"event-3">>]} = redq:flush(Q2).
@@ -102,8 +111,8 @@ end, Consumers = lists:seq(1, 10)),
 [receive N -> ok || N <- Consumers],
 
 %% Let's wait until everyone else have been sent a message, this does
-%% not guarantee that all consumer have processed the item, instead
-%% it guarantees that the message have been sent to the consumer
+%% not guarantee that all consumer have processed the item, but it
+%% does ensure that all consumers have been created.
 
 {ok, [Event]} = redq:take(Q3, [takelast]),
 io:format("consumer -1 <- ~s took event: ~s~n", [Q3, Event]),
@@ -112,17 +121,17 @@ io:format("consumer -1 <- ~s took event: ~s~n", [Q3, Event]),
 %% order
 
 %% Destroy the queue, removing all subscriptions
-ok = redq:purge(Q3).
+ok = redq:destroy(Q3).
 
 
-%% We can observe the events from any of the ancestors resources
+%% We can broadcast events and observe them from any of the ancestors resources
 ParentRes = lists:sublist(Resource, 2),
 {ok, ParentQ} = redq:consume(ParentRes),
 {ok, RootQ} = redq:consume(hd(Resource)),
 
-ok = redq:push(Resource, <<"event-5">>),
-ok = redq:push(Resource, <<"event-6">>),
-ok = redq:push(Resource, <<"event-7">>),
+ok = redq:push(Resource, <<"event-5">>, [broadcast]),
+ok = redq:push(Resource, <<"event-6">>, [broadcast]),
+ok = redq:push(Resource, <<"event-7">>, [broadcast]),
 
 {ok, [<<"event-5">>]} = redq:peek(ParentQ),
 {ok, [<<"event-5">>]} = redq:peek(RootQ),
@@ -130,30 +139,15 @@ ok = redq:push(Resource, <<"event-7">>),
 %% Or even at a specific position, remember this is 0-based indexes
 {ok, [<<"event-7">>]} = redq:peek(RootQ, [{n, 2}]),
 
-%% Parent queues aggregates all child queues, resulting in different
-%% views of the queue. Everything is lexical sorted so you might not
-%% loose all your hair
-ok = redq:push(Resource, <<"aaa-bbb">>),
-{ok, [<<"aaa-bbb">>]} = redq:peek(RootQ),
+%% Using `broadcast` one can observe all child queues, resulting in
+%% different views.
+ok = redq:push(Resource, <<"aaa-bbb">>, [broadcast]),
 
 %% Want to slice the queue into pieces and put them in a box?
 {ok, Box} = redq:take(RootQ, [{slice, 0, 3}),
-% {ok, [<<"aaa-bbb">>, <<"event-5">>, <<"event-6">>, <<"event-7">>]}
+% {ok, [<<"event-5">>, <<"event-6">>, <<"event-7">>, <<"aaa-bbb">>]}
 
 %% Remember that I never gave you any strong consistency guarantees,
 %% meaning multiple consumers may receive a event even though you use
 %% `take/1`.
-
-
-%% Finally you can push events with a ttl, if the event is not taken
-%% within the timeout it will be purged from redis and an notification
-%% will be sent to the consumer:
-{ok, Q4} = redq:consume(Resource),
-ok = redq:push(Resource, <<"ttl-event">>, [{ttl, 10}]),
-
-receive
-	{expired, Q4, Resource} ->
-			{expired, Resource}
-end.
-
 ```
