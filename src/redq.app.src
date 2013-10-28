@@ -1,6 +1,6 @@
 {application, redq, [
 	  {description, "Multi-channel queue wrapped around Redis"}
-	, {vsn, "0.1.0"}
+	, {vsn, "0.1.1"}
 	, {registered, []}
 	, {applications, [kernel, stdlib, eredis]}
 	, {mod, {redq_app, []}}
