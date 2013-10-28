@@ -13,12 +13,7 @@ new(Chan, AddChans, Opts) ->
 	new(Chan, AddChans, self(), Opts).
 
 new(Chan, AddChans, Parent, Opts) ->
-	supervisor:start_child(?sup, {{?MODULE, Chan}
-		, {?MODULE, consume, [Chan, AddChans, Parent, Opts]}
-		, permanent
-		, 5000
-		, worker
-		, [?MODULE]}).
+	supervisor:start_child(?sup, [Chan, AddChans, Parent, Opts]).
 
 consume(Chan, AddChans, Parent, Opts) ->
 	Pid = spawn_link(fun() ->
@@ -33,18 +28,19 @@ consume(Chan, AddChans, Parent, Opts) ->
 					ok
 			end,
 
-		loop(Chan, Parent, KillFun)
+		Ref = erlang:monitor(process, Parent),
+		loop(Chan, Parent, KillFun, Ref)
 	end),
 
 	{ok, Pid}.
 
 destroy(Chan) ->
 	case lists:keyfind({redq_chan, Chan}, 1, supervisor:which_children(?sup)) of
-		{{redq_chan, _} = ID, Pid, _Type, _} ->
+		{{redq_chan, _}, Pid, _Type, _} ->
 			Ref = erlang:monitor(process, Pid),
 			Pid ! stop,
 			receive {'DOWN', Ref, process, _, _} ->
-				ok = supervisor:delete_child(?sup, ID)
+				ok
 			end;
 
 		false ->
@@ -81,24 +77,27 @@ add_subscription(Channels) ->
 
 	{ok, Cont2}.
 
-loop(Chan, Proxy, CSP) ->
+loop(Chan, Proxy, CSP, Ref) when is_reference(Ref) ->
 	receive
 		{message, _Queue, Event, Pid2} ->
 			ok = eredis_sub:ack_message(Pid2),
 
 			Proxy ! {event, Chan, Event},
 
-			loop(Chan, Proxy, CSP);
+			loop(Chan, Proxy, CSP, Ref);
 
 		{pmessage, _Pattern, _Queue, Event, Pid2} ->
 			ok = eredis_sub:ack_message(Pid2),
 
 			Proxy ! {event, Chan, Event},
 
-			loop(Chan, Proxy, CSP);
+			loop(Chan, Proxy, CSP, Ref);
+
+		{'DOWN', Ref, process, _Parent, _Reason} ->
+			ok;
 
 		stop ->
-			ok = supervisor:terminate_child(?sup, {?MODULE, Chan})
+			ok
 	end.
 
 get_sub_pid() ->
