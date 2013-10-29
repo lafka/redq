@@ -7,13 +7,15 @@
 	, id/1
 ]).
 
--define(sup, redq_sup).
+-define(sup, redq_chan_sup).
 
 new(Chan, AddChans, Opts) ->
 	new(Chan, AddChans, self(), Opts).
 
 new(Chan, AddChans, Parent, Opts) ->
-	supervisor:start_child(?sup, [Chan, AddChans, Parent, Opts]).
+	supervisor:start_child(?sup, {{redq_chan, Chan}, {redq_chan, consume, [
+		Chan, AddChans, Parent, Opts
+	]}, transient, 5000, worker, [redq_chan]}).
 
 consume(Chan, AddChans, Parent, Opts) ->
 	Pid = spawn_link(fun() ->
@@ -36,11 +38,11 @@ consume(Chan, AddChans, Parent, Opts) ->
 
 destroy(Chan) ->
 	case lists:keyfind({redq_chan, Chan}, 1, supervisor:which_children(?sup)) of
-		{{redq_chan, _}, Pid, _Type, _} ->
+		{{redq_chan, _} = ChildRef, Pid, _Type, _} ->
 			Ref = erlang:monitor(process, Pid),
 			Pid ! stop,
 			receive {'DOWN', Ref, process, _, _} ->
-				ok
+				supervisor:delete_child(?sup, ChildRef)
 			end;
 
 		false ->
@@ -114,7 +116,8 @@ get_sub_pid() ->
 		P when is_pid(P) ->
 			{P, Return};
 
-		_ ->
+		Err ->
+			error_logger:error_msg("redis subscription failed: ~p~n", [Err]),
 			false
 	catch
 		A:B -> {error, {A, B}}
