@@ -248,6 +248,13 @@ return_items(Items, Opts) ->
 -ifdef(TEST).
 
 -include_lib("eunit/include/eunit.hrl").
+setup_() ->
+	[ok, ok] = [application:ensure_started(App) || App <- [eredis, redq]],
+	ok = cleanerlmsg(),
+	ok = cleanredis().
+
+shutdown_(_) ->
+	ok.
 %%
 %% There are 2 reasons to clean:
 %% a) Since we resume the queue, we have to note that the `take/1`
@@ -263,9 +270,16 @@ cleanerlmsg() ->
 		ok -> cleanerlmsg()
 	end.
 
-consumer_test() ->
-	P = self(),
-	spawn(fun() ->
+cleanredis() ->
+	{Pid, Cont} = get_pid(),
+	{ok, _} = eredis:q(Pid, ["FLUSHALL"]),
+	Cont(Pid).
+
+consumers_test_() ->
+	{setup
+	, fun setup_/0
+	, fun shutdown_/1
+	, ?_test(begin
 		_ = [application:ensure_started(X) || X <- [eredis, redq]],
 
 		Queue = [<<"a">>, <<"b">>, <<"c">>],
@@ -293,17 +307,15 @@ consumer_test() ->
 
 		?assertEqual({ok, [E3]}, redq:flush(Q2)),
 
-		?assertEqual(ok, redq:destroy(Q2)),
-
-		P ! ok
-	end),
-
-	receive ok -> ok end.
+		?assertEqual(ok, redq:destroy(Q2))
+	end)}.
 
 
-consume_wildcard_test() ->
-	P = self(),
-	spawn(fun() ->
+consume_wildcard_test_() ->
+	{setup
+	, fun setup_/0
+	, fun shutdown_/1
+	, ?_test(begin
 		_ = [application:ensure_started(X) || X <- [eredis, redq]],
 
 		Queue = [<<"a">>, <<"*">>],
@@ -312,44 +324,45 @@ consume_wildcard_test() ->
 		?assertEqual(ok, redq:push([<<"a">>, <<"b">>], <<"c">>)),
 		receive {event, _, _} = E -> ?assertEqual(E, {event, Q, <<"c">>}) end,
 
-		?assertEqual(ok, redq:destroy(Q)),
-
-		P ! ok
-	end),
-
-	receive ok -> ok end.
+		?assertEqual(ok, redq:destroy(Q))
+	end)}.
 
 multi_consumer_test() ->
-	_ = [application:ensure_started(X) || X <- [eredis, redq]],
+	{setup
+	, fun setup_/0
+	, fun shutdown_/1
+	, ?_test(begin
+		_ = [application:ensure_started(X) || X <- [eredis, redq]],
 
-	Queue = [<<"d">>, <<"e">>, <<"f">>],
-	E1 = <<"m-e-1">>,
-	{ok, Q} = redq:consume(Queue),
+		Queue = [<<"d">>, <<"e">>, <<"f">>],
+		E1 = <<"m-e-1">>,
+		{ok, Q} = redq:consume(Queue),
 
-	Parent = self(),
-	lists:foreach(fun(N) ->
-		sync_spawn(fun() ->
-			Child = spawn_link(fun() ->
-				receive
-					{event, LQ, E} ->
-						Parent ! {N, E, LQ},
-						redq:destroy(LQ)
-				end
-			end),
-			{ok, _} = redq:consume(Queue, [{proxy, Child}])
+		Parent = self(),
+		lists:foreach(fun(N) ->
+			sync_spawn(fun() ->
+				Child = spawn_link(fun() ->
+					receive
+						{event, LQ, E} ->
+							Parent ! {N, E, LQ},
+							redq:destroy(LQ)
+					end
+				end),
+				{ok, _} = redq:consume(Queue, [{proxy, Child}])
 
-		end)
-	end, Consumers = lists:seq(1, 35)),
+			end)
+		end, Consumers = lists:seq(1, 35)),
 
-	?assertEqual(ok, redq:push(Queue, E1)),
+		?assertEqual(ok, redq:push(Queue, E1)),
 
-	getall(Consumers, E1),
+		getall(Consumers, E1),
 
-	?assertEqual({ok, [E1]}, redq:take(Q, [])),
+		?assertEqual({ok, [E1]}, redq:take(Q, [])),
 
-	%% We used consume/1, so no proxy process was created - destroy
-	%% has no process to destroy so we get `notfound`
-	?assertEqual({error, notfound}, redq:destroy(Q)).
+		%% We used consume/1, so no proxy process was created - destroy
+		%% has no process to destroy so we get `notfound`
+		?assertEqual({error, notfound}, redq:destroy(Q))
+	end)}.
 
 sync_spawn(Fun) ->
 	Ref = make_ref(),
@@ -369,31 +382,34 @@ getall(Acc, E) ->
 	end.
 
 tree_publish_test() ->
-	_ = [application:ensure_started(X) || X <- [eredis, redq]],
+	{setup
+	, fun setup_/0
+	, fun shutdown_/1
+	, ?_test(begin
+		_ = [application:ensure_started(X) || X <- [eredis, redq]],
 
-	cleanerlmsg(),
+		P = self(),
+		lists:foldr(fun
+			(_, []) -> ok;
+			(_, [_ | NAcc] = Acc) ->
+			spawn(fun() ->
+				{ok, Q} = redq:consume(lists:reverse(Acc), [proxy]),
+				P ! {ok, length(Acc)},
+				receive {event, Q, _E} ->
+					P  ! {ok, length(Acc)},
+					redq:destroy(Q)
+				end
+			end),
+			NAcc
+		end, lists:reverse(["x", "y", "z", "x"]), lists:seq(1, 4)),
 
-	P = self(),
-	lists:foldr(fun
-		(_, []) -> ok;
-		(_, [_ | NAcc] = Acc) ->
-		spawn(fun() ->
-			{ok, Q} = redq:consume(lists:reverse(Acc), [proxy]),
-			P ! {ok, length(Acc)},
-			receive {event, Q, _E} ->
-				P  ! {ok, length(Acc)},
-				redq:destroy(Q)
-			end
-		end),
-		NAcc
-	end, lists:reverse(["x", "y", "z", "x"]), lists:seq(1, 4)),
+		[receive {ok, N} -> ok end || N <- lists:seq(1,4)],
 
-	[receive {ok, N} -> ok end || N <- lists:seq(1,4)],
+		ok = redq:push(["x", "y", "z", "x"], "e", [volatile, broadcast]),
 
-	ok = redq:push(["x", "y", "z", "x"], "e", [volatile, broadcast]),
-
-	?assertEqual([ok,ok,ok],
-		[receive {ok, N} -> ok end || N <- lists:seq(2, 4)]).
+		?assertEqual([ok,ok,ok],
+			[receive {ok, N} -> ok end || N <- lists:seq(2, 4)])
+	end)}.
 
 -endif.
 
