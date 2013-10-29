@@ -10,8 +10,7 @@
 	, remove/2
 ]).
 
--type queue() :: [namespace() | binary()].
--type namespace() :: binary().
+-type queue() :: [binary()].
 -type channel() :: binary().
 -type event() :: binary().
 -type events() :: [event()].
@@ -33,7 +32,7 @@ push(Queue, Event) ->
 
 
 -spec push(queue(), event(), push_opts()) ->
-	ok | {error, Err} when Err :: term().
+	ok | {error, Err} when Err :: no_connection.
 
 push([NS | Resource], Event, Opts) ->
 	Queues = case lists:member(broadcast, Opts) of
@@ -53,11 +52,14 @@ push([NS | Resource], Event, Opts) ->
 	end,
 
 	{Pid, Cont} = get_pid(),
-	[{ok, _} | _] = eredis:qp(Pid, lists:foldl(Expand, [], Queues)),
+	case eredis:qp(Pid, lists:foldl(Expand, [], Queues)) of
+		[{ok, _} | _] ->
+			_ = Cont(Pid),
+			ok;
 
-	_ = Cont(Pid),
-
-	ok.
+		{error, _} = Err ->
+			Err
+	end.
 
 
 -spec take(channel()) ->
@@ -81,14 +83,14 @@ take(Chan, Opts) ->
 		{ok, Items}
 	end).
 
--spec peek(queue()) ->
+-spec peek(channel()) ->
 	{ok, events()} | {errror, Err} when Err :: term().
 
 peek(Queue) ->
 	peek(Queue, []).
 
 
--spec peek(queue(), peek_opts()) ->
+-spec peek(channel(), peek_opts()) ->
 	{ok, events()} | {errror, Err} when Err :: term().
 
 peek(Chan, Opts) ->
@@ -151,9 +153,13 @@ consume([NS | Resource], Opts) ->
 
 	_ = Cont(Pid),
 
-	maybe_add_proxy(Chan, [key(queue, NS, Queue)], Opts),
+	case maybe_add_proxy(Chan, [key(queue, NS, Queue)], Opts) of
+		{ok, _} ->
+			{ok, to_binary(Chan)};
 
-	{ok, to_binary(Chan)}.
+		{error, _} = Err ->
+			Err
+	end.
 
 -spec destroy(channel()) -> ok | {error, Error} when Error :: term().
 
@@ -221,6 +227,8 @@ to_binary(P) when is_list(P) -> iolist_to_binary(P);
 to_binary(P) when is_atom(P) -> atom_to_binary(P, unicode);
 to_binary(P) when is_integer(P) -> to_binary(integer_to_list(P));
 to_binary(P) when is_binary(P) -> P.
+
+-spec with_queue([binary()], fun()) -> term() | {error, term()}.
 
 with_queue([NS, Chan], Fun) ->
 	{Pid, Cont} = get_pid(),

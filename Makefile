@@ -17,18 +17,18 @@ clean:
 	$(REBAR) clean
 
 APPS = kernel stdlib sasl erts ssl tools os_mon runtime_tools crypto inets \
-	public_key eunit syntax_tools compiler
+	public_key eunit syntax_tools compiler eredis
 
 COMBO_PLT = .dialyzer.plt
 
 check_plt: compile
-	$(DIALYZER) --check_plt --plt $(COMBO_PLT) --apps $(APPS)
+	$(DIALYZER) -pa deps/*/ebin --check_plt --plt $(COMBO_PLT) --apps $(APPS)
 
 build_plt: compile
-	$(DIALYZER) --build_plt --output_plt $(COMBO_PLT) --apps $(APPS)
+	$(DIALYZER) -pa deps/*/ebin --build_plt --output_plt $(COMBO_PLT) --apps $(APPS)
 
 dialyzer: compile
-	@$(DIALYZER) --plt $(COMBO_PLT) -Wno_return --src src
+	@$(DIALYZER) -pa deps/*/ebin --plt $(COMBO_PLT) -Wno_return --src src
 
 test: test-ct test-eunit
 
