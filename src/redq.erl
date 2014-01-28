@@ -241,7 +241,9 @@ maybe_add_proxy(Chan, Opts) ->
 		false        -> lists:member(proxy, Opts) andalso self()
 	end,
 
-	if is_pid(Parent) -> redq_chan:new(Chan, [], Parent, Opts);
+	Patterns = proplists:get_all_values(chan, Opts),
+
+	if is_pid(Parent) -> redq_chan:new(Chan, Patterns, Parent, Opts);
 	   true -> {ok, Chan}
 	end.
 
@@ -498,6 +500,25 @@ getall(Acc, E) ->
 	receive {N, E, _Chan} ->
 		getall(lists:delete(N, Acc), E)
 	end.
+
+% Support consuming multiple channels, currently only useful when
+% using `proxy` option as there exists no channel -> channel
+% relationship. The origin chan of the emitted event will be shadowed
+% by the primary channel selected.
+multi_channel_consumer_test_() ->
+	{setup
+	, fun setup_/0
+	, fun shutdown_/1
+	, ?_test(begin
+		{ok, Chan} = redq:consume({chan, <<"a">>}, [{chan, <<"b">>}, proxy]),
+
+		ok = redq:push({chan, <<"b">>}, <<"ev">>),
+
+		?assertEqual({event, <<"a">>, <<"ev">>},
+			receive {event, _, _} = E -> E
+			after 1000 -> {error, timeout}
+		end)
+	end)}.
 
 %tree_publish_test() ->
 %	{setup
