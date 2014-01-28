@@ -43,11 +43,15 @@ consume(Chan, Patterns, Parent, Opts) ->
 
 destroy(Chan) ->
 	case lists:keyfind({redq_chan, Chan}, 1, supervisor:which_children(?sup)) of
+		{{redq_chan, _} = ChildRef, undefined, _Type, _} ->
+			ok = supervisor:delete_child(?sup, ChildRef);
+
 		{{redq_chan, _} = ChildRef, Pid, _Type, _} ->
 			Ref = erlang:monitor(process, Pid),
 			Pid ! stop,
+
 			receive {'DOWN', Ref, process, _, _} ->
-				supervisor:delete_child(?sup, ChildRef)
+				ok = supervisor:delete_child(?sup, ChildRef)
 			end;
 
 		false ->
@@ -94,13 +98,13 @@ add_subscription(Channels) ->
 	Cont2 = if
 		Wildcard ->
 			ok = eredis_sub:psubscribe(Sub, Channels),
-			fun(P) ->
-				eredis_sub:punsubscribe(P, Channels), Cont(P) end;
+			fun() ->
+				eredis_sub:punsubscribe(Sub, Channels), Cont(Sub) end;
 
 		true ->
 			ok = eredis_sub:subscribe(Sub, Channels),
-			fun(P) ->
-				eredis_sub:unsubscribe(P, Channels), Cont(P) end
+			fun() ->
+				eredis_sub:unsubscribe(Sub, Channels), Cont(Sub) end
 	end,
 
 	[receive {subscribed, K, Sub} -> eredis_sub:ack_message(Sub) end
@@ -110,6 +114,9 @@ add_subscription(Channels) ->
 
 	{ok, Cont2}.
 
+% If this crashes we will be with CSP never been called and
+% subscription never being cleaned up. Maybe spawn a separate process
+% to monitor instead....
 loop(Chan, Proxy, CSP, Ref) when is_reference(Ref) ->
 	receive
 		{message, _Queue, Event, Pid2} ->
@@ -127,9 +134,12 @@ loop(Chan, Proxy, CSP, Ref) when is_reference(Ref) ->
 			loop(Chan, Proxy, CSP, Ref);
 
 		{'DOWN', Ref, process, _Parent, _Reason} ->
-			ok;
+			R = CSP(),
+			spawn(fun() -> redq_chan:destroy(Chan) end), % probably will fuck me over one day!
+			R;
 
 		stop ->
+			CSP(),
 			ok
 	end.
 
@@ -158,6 +168,12 @@ get_sub_pid() ->
 
 -include_lib("eunit/include/eunit.hrl").
 
+setup_() ->
+	_ = [ok = application:ensure_started(X) || X <- [eredis, redq]].
+
+teardown_(_) ->
+	_ = [ok = application:stop(X) || X <- [eredis, redq]].
+
 pubsub_test() ->
 	_ = [ ok = application:ensure_started(X) || X <- [eredis, redq]],
 	{ok, Pid} = eredis:start_link(),
@@ -169,4 +185,27 @@ pubsub_test() ->
 
 	redq_chan:destroy(Chan).
 
+% Check that all consumers are properly terminated when parent dies
+kill_consumers_test_() ->
+	{setup
+	, fun setup_/0
+	, fun teardown_/1
+	, ?_test(begin
+		Parent = self(),
+		_ = [ok = application:ensure_started(X) || X <- [eredis, redq]],
+		[A,B|Children]= [spawn(fun() ->
+				{ok, P} = redq_chan:new(<<N>>, [], self(), []),
+				Parent ! {N, P},
+				timer:sleep(5000)
+			end) || N <- lists:seq(48,51)],
+
+		[_,_,X,Y] = [receive {N, _P} -> N end || N <- lists:seq(48, 51)],
+		[exit(P, diedie) || P <- [A,B]],
+		timer:sleep(2), % Wait for async ops
+
+		?assertEqual(length(Children), length(supervisor:which_children(?sup))),
+		[redq_chan:destroy(<<N>>) || N <- [X,Y]],
+
+		?assertEqual([], supervisor:which_children(?sup))
+	end)}.
 -endif.
