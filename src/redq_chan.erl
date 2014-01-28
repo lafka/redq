@@ -9,20 +9,22 @@
 
 -define(sup, redq_chan_sup).
 
-new(Chan, AddChans, Opts) ->
-	new(Chan, AddChans, self(), Opts).
+new(Chan, Patterns, Opts) ->
+	new(Chan, Patterns, self(), Opts).
 
-new(Chan, AddChans, Parent, Opts) ->
+new(Chan, Patterns, Parent, Opts) ->
 	supervisor:start_child(?sup, {{redq_chan, Chan}, {redq_chan, consume, [
-		Chan, AddChans, Parent, Opts
+		Chan, Patterns, Parent, Opts
 	]}, transient, 5000, worker, [redq_chan]}).
 
-consume(Chan, AddChans, Parent, Opts) ->
+consume(Chan, Patterns, Parent, Opts) ->
+	{Self, Ref} = {self(), make_ref()},
 	Pid = spawn_link(fun() ->
-		{ok, KillFun} = add_subscription([Chan | AddChans]),
+		{ok, KillFun} = add_subscription([Chan | Patterns]),
 
+		% Proxy old events if there are any events in the channel
 		not lists:member(nopeek, Opts) andalso
-			case redq:peek(Chan, [{slice, all}]) of
+			case redq:peek({chan, Chan}, [{slice, all}]) of
 				{ok, Items} ->
 					_ = [Parent ! {event, Chan, E} || E <- Items];
 
@@ -30,11 +32,14 @@ consume(Chan, AddChans, Parent, Opts) ->
 					ok
 			end,
 
-		Ref = erlang:monitor(process, Parent),
-		loop(Chan, Parent, KillFun, Ref)
+		Ref2 = erlang:monitor(process, Parent),
+		Self ! {ok, Ref},
+
+		loop(Chan, Parent, KillFun, Ref2)
 	end),
 
-	{ok, Pid}.
+	receive {ok, Ref} -> {ok, Pid}
+	after 5000 -> {error, timeout} end.
 
 destroy(Chan) ->
 	case lists:keyfind({redq_chan, Chan}, 1, supervisor:which_children(?sup)) of
@@ -49,11 +54,35 @@ destroy(Chan) ->
 			{error, notfound}
 	end.
 
-id(NS) ->
-	random:seed(os:timestamp()),
-	join([NS,
-		integer_to_list(random:uniform(16#FFFFFFFFFFFFFFFFFFFFF), 36)]
-		, <<$/>>).
+id(Worker) ->
+	{M, S, Ms} = erlang:now(),
+	<<I:80>> = <<Worker:16, ((M*100000000 + S*1000000 + Ms)):64>>,
+	as_bin(I, 62).
+
+%%
+%% n.b. - unique_id_62/0 and friends pulled from riak
+%%
+as_bin(I, 10) ->
+	erlang:integer_to_binary(I);
+as_bin(I, Base) when is_integer(I), is_integer(Base),
+	Base >= 2, Base =< 1+$Z-$A+10+1+$z-$a ->
+
+	list_to_binary(if I < 0 -> [$-|as_bin(-I, Base, [])];
+	   true -> as_bin(I, Base, [])
+	end);
+as_bin(I, Base) ->
+	erlang:error(badarg, [I, Base]).
+
+as_bin(I0, Base, R0) ->
+	{D, I1} = {I0 rem Base, I0 div Base},
+	R1 = if D >= 36 -> [D-36+$a|R0];
+			D >= 10 -> [D-10+$A|R0];
+			true -> [D+$0|R0]
+	end,
+
+	if I1 =:= 0 -> R1;
+	   true -> as_bin(I1, Base, R1)
+	end.
 
 
 add_subscription(Channels) ->
@@ -76,6 +105,8 @@ add_subscription(Channels) ->
 
 	[receive {subscribed, K, Sub} -> eredis_sub:ack_message(Sub) end
 		|| K <- Channels],
+
+	ok = eredis_sub:controlling_process(Sub),
 
 	{ok, Cont2}.
 
@@ -123,20 +154,19 @@ get_sub_pid() ->
 		A:B -> {error, {A, B}}
 	end.
 
-to_binary(P) when is_list(P) -> iolist_to_binary(P);
-to_binary(P) when is_atom(P) -> atom_to_binary(P, unicode);
-to_binary(P) when is_integer(P) -> to_binary(integer_to_list(P));
-to_binary(P) when is_binary(P) -> P.
+-ifdef(TEST).
 
-join([], _Sep) ->
-	<<>>;
-join(Parts, Sep) ->
-	<<Sep:1/binary, Acc/binary>> = join(Parts, Sep, <<>>),
-	Acc.
+-include_lib("eunit/include/eunit.hrl").
 
-join([], _Sep, Acc) ->
-	Acc;
-join([[] | Rest], Sep, Acc) ->
-	join(Rest, Sep, Acc);
-join([P | Rest], Sep, Acc) ->
-	join(Rest, Sep, <<Acc/binary, Sep/binary, ((to_binary(P)))/binary>>).
+pubsub_test() ->
+	_ = [ ok = application:ensure_started(X) || X <- [eredis, redq]],
+	{ok, Pid} = eredis:start_link(),
+	{ok, Chan} = redq_chan:new(<<"a">>, [], self(), []),
+	{ok, _} = eredis:q(Pid, ["PUBLISH", "a", "xyz"]),
+
+	receive {event, _, _} = X ->
+		?assertEqual({event, <<"a">>, <<"xyz">>}, X) end,
+
+	redq_chan:destroy(Chan).
+
+-endif.

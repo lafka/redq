@@ -8,8 +8,9 @@
 
 
 start(_StartType, _StartArgs) ->
-    redq_sup:start_link().
+	random:seed(os:timestamp()),
+	redq_sup:start_link().
 
 
 stop(_State) ->
-    ok.
+	ok.
