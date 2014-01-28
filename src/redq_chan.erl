@@ -175,7 +175,10 @@ teardown_(_) ->
 	_ = [ok = application:stop(X) || X <- [eredis, redq]].
 
 pubsub_test() ->
-	_ = [ ok = application:ensure_started(X) || X <- [eredis, redq]],
+	{setup
+	, fun setup_/0
+	, fun teardown_/1
+	, ?_test(begin
 	{ok, Pid} = eredis:start_link(),
 	{ok, Chan} = redq_chan:new(<<"a">>, [], self(), []),
 	{ok, _} = eredis:q(Pid, ["PUBLISH", "a", "xyz"]),
@@ -183,7 +186,8 @@ pubsub_test() ->
 	receive {event, _, _} = X ->
 		?assertEqual({event, <<"a">>, <<"xyz">>}, X) end,
 
-	redq_chan:destroy(Chan).
+	redq_chan:destroy(Chan)
+	end)}.
 
 % Check that all consumers are properly terminated when parent dies
 kill_consumers_test_() ->
@@ -192,7 +196,6 @@ kill_consumers_test_() ->
 	, fun teardown_/1
 	, ?_test(begin
 		Parent = self(),
-		_ = [ok = application:ensure_started(X) || X <- [eredis, redq]],
 		[A,B|Children]= [spawn(fun() ->
 				{ok, P} = redq_chan:new(<<N>>, [], self(), []),
 				Parent ! {N, P},
@@ -201,7 +204,7 @@ kill_consumers_test_() ->
 
 		[_,_,X,Y] = [receive {N, _P} -> N end || N <- lists:seq(48, 51)],
 		[exit(P, diedie) || P <- [A,B]],
-		timer:sleep(2), % Wait for async ops
+		timer:sleep(1), % Wait for async ops, can add monitor on X/Y
 
 		?assertEqual(length(Children), length(supervisor:which_children(?sup))),
 		[redq_chan:destroy(<<N>>) || N <- [X,Y]],
