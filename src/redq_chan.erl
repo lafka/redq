@@ -35,7 +35,7 @@ consume(Chan, Patterns, Parent, Opts) ->
 		Ref2 = erlang:monitor(process, Parent),
 		Self ! {ok, Ref},
 
-		loop(Chan, Parent, KillFun, Ref2)
+		loop(Chan, Parent, KillFun, Ref2, lists:member(rewrite, Opts))
 	end),
 
 	receive {ok, Ref} -> {ok, Pid}
@@ -117,21 +117,23 @@ add_subscription(Channels) ->
 % If this crashes we will be with CSP never been called and
 % subscription never being cleaned up. Maybe spawn a separate process
 % to monitor instead....
-loop(Chan, Proxy, CSP, Ref) when is_reference(Ref) ->
+loop(Chan, Proxy, CSP, Ref, Rewrite) when is_reference(Ref) ->
 	receive
-		{message, _Queue, Event, Pid2} ->
+		{message, SrcChan, Event, Pid2} ->
 			ok = eredis_sub:ack_message(Pid2),
 
-			Proxy ! {event, Chan, Event},
+			if Rewrite -> Proxy ! {event, Chan, Event};
+			   true -> Proxy ! {event, SrcChan, Event} end,
 
-			loop(Chan, Proxy, CSP, Ref);
+			loop(Chan, Proxy, CSP, Ref, Rewrite);
 
-		{pmessage, _Pattern, _Queue, Event, Pid2} ->
+		{pmessage, _Pattern, SrcChan, Event, Pid2} ->
 			ok = eredis_sub:ack_message(Pid2),
 
-			Proxy ! {event, Chan, Event},
+			if Rewrite -> Proxy ! {event, Chan, Event};
+			   true -> Proxy ! {event, SrcChan, Event} end,
 
-			loop(Chan, Proxy, CSP, Ref);
+			loop(Chan, Proxy, CSP, Ref, Rewrite);
 
 		{'DOWN', Ref, process, _Parent, _Reason} ->
 			R = CSP(),

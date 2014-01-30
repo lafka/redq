@@ -514,7 +514,14 @@ multi_channel_consumer_test_() ->
 
 		ok = redq:push({chan, <<"b">>}, <<"ev">>),
 
-		?assertEqual({event, <<"a">>, <<"ev">>},
+		?assertEqual({event, <<"b">>, <<"ev">>},
+			receive {event, _, _} = E -> E
+			after 1000 -> {error, timeout}
+		end),
+
+		{ok, Chan2} = redq:consume({chan, <<"c">>}, [{chan, <<"d">>}, rewrite, proxy]),
+		ok = redq:push({chan, <<"d">>}, <<"ev">>),
+		?assertEqual({event, <<"c">>, <<"ev">>},
 			receive {event, _, _} = E -> E
 			after 1000 -> {error, timeout}
 		end)
