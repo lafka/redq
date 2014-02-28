@@ -9,6 +9,7 @@
 	, flush/1
 	, remove/2
 	, size/1
+	, meta/2, meta/3
 ]).
 
 -type queue() :: [binary()].
@@ -199,6 +200,27 @@ size({queue, Queue}) ->
 
 		{error, _} = Err ->
 			_ = Cont(Pid),
+			Err
+	end.
+
+-spec meta({chan, channel()}, binary()) ->
+	{ok, Val} | {error, Err} when Err :: term(), Val :: undefined | binary().
+meta({chan, Chan}, Key) ->
+	{Pid, Cont} = get_pid(),
+	Res = eredis:q(Pid, ["HGET", key([Chan], chanmeta), Key]), 
+	_ = Cont(Pid),
+	Res.
+
+-spec meta({chan, channel()}, binary(), binary()) ->
+	ok | {error, Err} when Err :: term().
+meta({chan, Chan}, Key, Val) ->
+	{Pid, Cont} = get_pid(),
+	case eredis:q(Pid, ["HSET", key([Chan], chanmeta), Key, Val]) of
+		{ok, _} ->
+			_ = Cont(Pid),
+			ok;
+
+		{error, _} = Err ->
 			Err
 	end.
 
@@ -571,6 +593,21 @@ size_test_() ->
 		?assertEqual({ok, 1}, redq:size({queue, Q1})),
 		?assertEqual({ok, 2}, redq:size({queue, Q2})),
 		?assertEqual({ok, 3}, redq:size(Chan)),
+
+		ok
+	end)}.
+
+meta_test_() ->
+	{setup
+	, fun setup_/0
+	, fun shutdown_/1
+	, ?_test(begin
+		{Q1, Q2} = {[<<"a">>, <<"b">>], [<<"a">>, <<"c">>]},
+		{ok, Chan} = redq:consume({queue, Q1}, [{queue, Q2}]),
+
+		?assertEqual(ok, redq:meta(Chan, <<"k">>, <<"v">>)),
+		?assertEqual({ok, <<"v">>}, redq:meta(Chan, <<"k">>)),
+		?assertEqual({ok, undefined}, redq:meta(Chan, <<"not-found">>)),
 
 		ok
 	end)}.
