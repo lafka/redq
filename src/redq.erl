@@ -215,14 +215,13 @@ meta({chan, Chan}, Key) ->
 	ok | {error, Err} when Err :: term().
 meta({chan, Chan}, Key, Val) ->
 	{Pid, Cont} = get_pid(),
-	case eredis:q(Pid, ["HSET", key([Chan], chanmeta), Key, Val]) of
-		{ok, _} ->
-			_ = Cont(Pid),
-			ok;
+	Res = case eredis:q(Pid, ["HSET", key([Chan], chanmeta), Key, Val]) of
+		{ok, _}          -> ok;
+		{error, _} = Err -> Err
+	end,
+	_ = Cont(Pid),
+	Res.
 
-		{error, _} = Err ->
-			Err
-	end.
 
 
 -spec consume({queue, queue()} | {chan, channel()}) ->
