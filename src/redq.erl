@@ -8,6 +8,7 @@
 	, take/1, take/2
 	, flush/1
 	, remove/2
+	, size/1
 ]).
 
 -type queue() :: [binary()].
@@ -172,6 +173,34 @@ remove({chan, Chan}, Event) ->
 			[{ok, _}|_] = eredis:qp(Pid, [["SREM", key(Q, queue), Event] || Q <- Queues]),
 			ok
 	end).
+
+-spec size({queue, queue()} | {chan, channel()}) ->
+	{ok, non_neg_integer()} | {error, Err} when Err :: term().
+
+size({chan, Chan}) ->
+	with_chan(Chan, fun
+		(_Pid, []) -> {error, no_queue};
+		(Pid, Queues) ->
+			Res = eredis:qp(Pid, [["SCARD", key(Q, queue)] || Q <- Queues]),
+			lists:foldl(fun
+				({ok, N}, {ok, Acc}) ->
+					{ok, binary_to_integer(N) + Acc};
+
+				({error, _} = Err, _) -> Err
+
+			end, {ok, 0}, Res)
+	end);
+size({queue, Queue}) ->
+	{Pid, Cont} = get_pid(),
+	case eredis:q(Pid, ["SCARD", key(Queue, queue)]) of
+		{ok, Size} ->
+			_ = Cont(Pid),
+			{ok, binary_to_integer(Size)};
+
+		{error, _} = Err ->
+			_ = Cont(Pid),
+			Err
+	end.
 
 
 -spec consume({queue, queue()} | {chan, channel()}) ->
@@ -525,6 +554,25 @@ multi_channel_consumer_test_() ->
 			receive {event, _, _} = E -> E
 			after 1000 -> {error, timeout}
 		end)
+	end)}.
+
+size_test_() ->
+	{setup
+	, fun setup_/0
+	, fun shutdown_/1
+	, ?_test(begin
+		{Q1, Q2} = {[<<"a">>, <<"b">>], [<<"a">>, <<"c">>]},
+		{ok, Chan} = redq:consume({queue, Q1}, [{queue, Q2}]),
+
+		?assertEqual(ok, redq:push({queue, Q1}, <<"ev1">>)),
+		?assertEqual(ok, redq:push({queue, Q2}, <<"ev2">>)),
+		?assertEqual(ok, redq:push({queue, Q2}, <<"ev3">>)),
+
+		?assertEqual({ok, 1}, redq:size({queue, Q1})),
+		?assertEqual({ok, 2}, redq:size({queue, Q2})),
+		?assertEqual({ok, 3}, redq:size(Chan)),
+
+		ok
 	end)}.
 
 %tree_publish_test() ->
