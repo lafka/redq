@@ -203,8 +203,21 @@ size({queue, Queue}) ->
 			Err
 	end.
 
--spec meta({chan, channel()}, binary()) ->
-	{ok, Val} | {error, Err} when Err :: term(), Val :: undefined | binary().
+-spec meta({chan, channel()}, all | binary()) ->
+	{ok, Val} | {error, Err} when Err :: term(),
+	                              Val :: undefined | binary() | [tuple()].
+meta({chan, Chan}, all) ->
+	{Pid, Cont} = get_pid(),
+
+	case eredis:q(Pid, ["HGETALL", key([Chan], chanmeta)]) of
+		{ok, Items} ->
+			_ = Cont(Pid),
+			{ok, pair(Items)};
+
+		{error, _} = Err ->
+			_ = Cont(Pid),
+			Err
+	end;
 meta({chan, Chan}, Key) ->
 	{Pid, Cont} = get_pid(),
 	Res = eredis:q(Pid, ["HGET", key([Chan], chanmeta), Key]), 
@@ -221,8 +234,6 @@ meta({chan, Chan}, Key, Val) ->
 	end,
 	_ = Cont(Pid),
 	Res.
-
-
 
 -spec consume({queue, queue()} | {chan, channel()}) ->
 	{ok, channel()} | {error, Err} when Err :: term().
@@ -367,6 +378,12 @@ return_items(Items, Opts) ->
 		[_, {slice, P, L}]    -> {P, L}  end,
 
 	{ok, lists:sublist(lists:sort(Items), Pos, Len)}.
+
+pair(Items) -> pair(Items, []).
+
+pair([], Acc) -> Acc;
+pair([K, V | Rest], Acc) ->
+	pair(Rest, [{K, V} | Acc]).
 
 
 -ifdef(TEST).
@@ -607,6 +624,15 @@ meta_test_() ->
 		?assertEqual(ok, redq:meta(Chan, <<"k">>, <<"v">>)),
 		?assertEqual({ok, <<"v">>}, redq:meta(Chan, <<"k">>)),
 		?assertEqual({ok, undefined}, redq:meta(Chan, <<"not-found">>)),
+
+		?assertEqual(ok, redq:meta(Chan, <<"x">>, <<"1">>)),
+		?assertEqual(ok, redq:meta(Chan, <<"y">>, <<"2">>)),
+		?assertEqual(ok, redq:meta(Chan, <<"z">>, <<"3">>)),
+
+		?assertEqual({ok, [{<<"z">>, <<"3">>},
+		                   {<<"y">>, <<"2">>},
+		                   {<<"x">>, <<"1">>},
+		                   {<<"k">>, <<"v">>}]}, redq:meta(Chan, all)),
 
 		ok
 	end)}.
