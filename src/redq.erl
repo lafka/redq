@@ -487,6 +487,28 @@ named_consumer_test_() ->
 		ok
 	end)}.
 
+named_chan_and_queues_test_() ->
+	{setup
+	, fun setup_/0
+	, fun shutdown_/1
+	, ?_test(begin
+		[Q1, Q2] = Queues = [{queue, ["x", "x"]}, {queue, ["x", "y"]}],
+		{ok, Chan} = redq:consume({chan, <<"c">>}, Queues),
+
+		?assertEqual({chan, <<"c">>}, Chan),
+
+		?assertEqual(ok, redq:push(Q1, <<"xx1">>)),
+		?assertEqual(ok, redq:push(Q1, <<"xx2">>)),
+		?assertEqual(ok, redq:push(Q2, <<"xy1">>)),
+		?assertEqual(ok, redq:push(Q2, <<"xy2">>)),
+
+		?assertEqual({ok, 4}, redq:size(Chan)),
+		?assertEqual({ok, [<<"xx1">>, <<"xx2">>, <<"xy1">>, <<"xy2">>]}
+					, redq:peek(Chan, [{slice, all}])),
+
+		ok
+	end)}.
+
 consumers_test_() ->
 	{setup
 	, fun setup_/0
