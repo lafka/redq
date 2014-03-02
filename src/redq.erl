@@ -9,7 +9,7 @@
 	, flush/1
 	, remove/2
 	, size/1
-	, meta/2, meta/3
+	, meta/2, meta/3, meta/4
 ]).
 
 -type queue() :: [binary()].
@@ -227,8 +227,16 @@ meta({chan, Chan}, Key) ->
 -spec meta({chan, channel()}, binary(), binary()) ->
 	ok | {error, Err} when Err :: term().
 meta({chan, Chan}, Key, Val) ->
+	meta({chan, Chan}, Key, Val, set).
+
+meta({chan, Chan}, Key, Val, inc) ->
+	meta2({chan, Chan}, Key, Val, "HINCRBY");
+meta({chan, Chan}, Key, Val, set) ->
+	meta2({chan, Chan}, Key, Val, "HSET").
+
+meta2({chan, Chan}, Key, Val, Op) ->
 	{Pid, Cont} = get_pid(),
-	Res = case eredis:q(Pid, ["HSET", key([Chan], chanmeta), Key, Val]) of
+	Res = case eredis:q(Pid, [Op, key([Chan], chanmeta), Key, Val]) of
 		{ok, _}          -> ok;
 		{error, _} = Err -> Err
 	end,
@@ -633,6 +641,10 @@ meta_test_() ->
 		                   {<<"y">>, <<"2">>},
 		                   {<<"x">>, <<"1">>},
 		                   {<<"k">>, <<"v">>}]}, redq:meta(Chan, all)),
+
+		?assertEqual(ok, redq:meta(Chan, <<"inc">>, 1, inc)),
+		?assertEqual(ok, redq:meta(Chan, <<"inc">>, 2, inc)),
+		?assertEqual({ok, <<"3">>}, redq:meta(Chan, <<"inc">>)),
 
 		ok
 	end)}.
