@@ -32,13 +32,23 @@ consume(Chan, Patterns, Parent, Opts) ->
 					ok
 			end,
 
-		Ref2 = erlang:monitor(process, Parent),
-		Self ! {ok, Ref},
+		Alive = is_process_alive(Parent),
+		if
+			Alive ->
+				link(Parent),
+				Self ! {ok, Ref},
+				loop(Chan, Parent, KillFun, lists:member(rewrite, Opts));
 
-		loop(Chan, Parent, KillFun, Ref2, lists:member(rewrite, Opts))
+			true ->
+				% Don't bother restarting if parent is dead, parent
+				% must respawn new consumer
+				Self ! {error, Ref, parent}
+		end
 	end),
 
-	receive {ok, Ref} -> {ok, Pid}
+	receive
+		{ok, Ref} -> {ok, Pid};
+		{error, Ref, parent} -> {error, dead_parent}
 	after 5000 -> {error, timeout} end.
 
 destroy(Chan) ->
@@ -117,7 +127,7 @@ add_subscription(Channels) ->
 % If this crashes we will be with CSP never been called and
 % subscription never being cleaned up. Maybe spawn a separate process
 % to monitor instead....
-loop(Chan, Proxy, CSP, Ref, Rewrite) when is_reference(Ref) ->
+loop(Chan, Proxy, CSP, Rewrite) ->
 	receive
 		{message, SrcChan, Event, Pid2} ->
 			ok = eredis_sub:ack_message(Pid2),
@@ -125,7 +135,7 @@ loop(Chan, Proxy, CSP, Ref, Rewrite) when is_reference(Ref) ->
 			if Rewrite -> Proxy ! {event, Chan, Event};
 			   true -> Proxy ! {event, SrcChan, Event} end,
 
-			loop(Chan, Proxy, CSP, Ref, Rewrite);
+			loop(Chan, Proxy, CSP, Rewrite);
 
 		{pmessage, _Pattern, SrcChan, Event, Pid2} ->
 			ok = eredis_sub:ack_message(Pid2),
@@ -133,12 +143,7 @@ loop(Chan, Proxy, CSP, Ref, Rewrite) when is_reference(Ref) ->
 			if Rewrite -> Proxy ! {event, Chan, Event};
 			   true -> Proxy ! {event, SrcChan, Event} end,
 
-			loop(Chan, Proxy, CSP, Ref, Rewrite);
-
-		{'DOWN', Ref, process, _Parent, _Reason} ->
-			R = CSP(),
-			spawn(fun() -> redq_chan:destroy(Chan) end), % probably will fuck me over one day!
-			R;
+			loop(Chan, Proxy, CSP, Rewrite);
 
 		stop ->
 			CSP(),
@@ -197,19 +202,22 @@ kill_consumers_test_() ->
 	, fun setup_/0
 	, fun teardown_/1
 	, ?_test(begin
+		Consumers = lists:seq(48, 51),
 		Parent = self(),
-		[A,B|Children]= [spawn(fun() ->
+		Children = [spawn(fun() ->
 				{ok, P} = redq_chan:new(<<N>>, [], self(), []),
 				Parent ! {N, P},
 				timer:sleep(5000)
-			end) || N <- lists:seq(48,51)],
+			end) || N <- Consumers],
 
-		[_,_,X,Y] = [receive {N, _P} -> N end || N <- lists:seq(48, 51)],
-		[exit(P, diedie) || P <- [A,B]],
-		timer:sleep(1), % Wait for async ops, can add monitor on X/Y
+		[receive {N, _P} -> ok end || N <- Consumers],
 
 		?assertEqual(length(Children), length(supervisor:which_children(?sup))),
-		[redq_chan:destroy(<<N>>) || N <- [X,Y]],
+		[begin
+			Ref = monitor(process, P),
+			S = exit(P, kill),
+			receive {'DOWN', Ref, process, R, killed} -> ok end
+		 end || P <- Children],
 
 		?assertEqual([], supervisor:which_children(?sup))
 	end)}.
