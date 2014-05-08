@@ -300,7 +300,7 @@ consume2(Chan0, Queues, Opts) ->
 -spec destroy(channel()) -> ok | {error, Error} when Error :: term().
 
 destroy({chan, Chan}) ->
-	redq_chan:destroy(Chan).
+	redq_chan_manager:destroy(Chan).
 
 
 %% Private
@@ -312,7 +312,7 @@ maybe_add_proxy(Chan, Opts) ->
 
 	Patterns = proplists:get_all_values(chan, Opts),
 
-	if is_pid(Parent) -> redq_chan:new(Chan, Patterns, Parent, Opts);
+	if is_pid(Parent) -> redq_chan_manager:add(Chan, Patterns, Parent, Opts);
 	   true -> {ok, Chan}
 	end.
 
@@ -541,6 +541,35 @@ consumers_test_() ->
 		?assertEqual({ok, [E3]}, redq:flush(Chan2)),
 
 		?assertEqual(ok, redq:destroy(Chan2))
+	end)}.
+
+consumer_crash_test_() ->
+	{setup
+	, fun setup_/0
+	, fun shutdown_/1
+	, ?_test(begin
+		{chan, ChanName} = Chan = {chan, <<"crashing-chan">>},
+
+		% Direct shutdown
+		{ok, Chan} = redq:consume(Chan, [proxy]),
+		{ok, Pid} = redq_chan_manager:whereis(ChanName),
+
+		exit(Pid, shutdown),
+
+		?assertEqual({error, notfound}, redq_chan_manager:whereis(Chan)),
+
+		% Parent crash
+		{Self, Ref} = {self(), make_ref()},
+		Child = spawn(fun() ->
+			{ok, {chan, ChanName}} = redq:consume(Chan, [proxy]),
+			{ok, Pid} = redq_chan_manager:whereis(ChanName),
+			Self ! {ok, Ref},
+			timer:sleep(5000)
+		end),
+
+		exit(Child, kill),
+
+		?assertEqual({error, notfound}, redq_chan_manager:whereis(Chan))
 	end)}.
 
 

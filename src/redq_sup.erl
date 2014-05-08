@@ -15,6 +15,9 @@ init([]) ->
     {ok, { {one_for_one, 5, 10}, [
 		{redq_chan_sup
 			, {redq_chan_sup, start_link, []}
-			, permanent, 5000, supervisor, [redq_chan_sup]}
+			, permanent, 5000, supervisor, [redq_chan_sup]},
+		{redq_chan_manager
+			, {redq_chan_manager, start_link, []}
+			, permanent, 5000, worker, [redq_chan_manager]}
 	]} }.
 

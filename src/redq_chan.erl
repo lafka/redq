@@ -3,7 +3,6 @@
 -export([
 	  new/3, new/4
 	, consume/4
-	, destroy/1
 	, id/1
 ]).
 
@@ -13,12 +12,10 @@ new(Chan, Patterns, Opts) ->
 	new(Chan, Patterns, self(), Opts).
 
 new(Chan, Patterns, Parent, Opts) ->
-	supervisor:start_child(?sup, {{redq_chan, Chan}, {redq_chan, consume, [
-		Chan, Patterns, Parent, Opts
-	]}, transient, 5000, worker, [redq_chan]}).
+	supervisor:start_child(?sup, [Chan, Patterns, Parent, Opts]).
 
 consume(Chan, Patterns, Parent, Opts) ->
-	{Self, Ref} = {self(), make_ref()},
+	Self = self(),
 	Pid = spawn_link(fun() ->
 		{ok, KillFun} = add_subscription([Chan | Patterns]),
 
@@ -35,38 +32,21 @@ consume(Chan, Patterns, Parent, Opts) ->
 		Alive = is_process_alive(Parent),
 		if
 			Alive ->
-				link(Parent),
+				Ref = monitor(process, Parent),
 				Self ! {ok, Ref},
 				loop(Chan, Parent, KillFun, lists:member(rewrite, Opts));
 
 			true ->
 				% Don't bother restarting if parent is dead, parent
 				% must respawn new consumer
-				Self ! {error, Ref, parent}
+				Self ! {error, parent}
 		end
 	end),
 
 	receive
-		{ok, Ref} -> {ok, Pid};
-		{error, Ref, parent} -> {error, dead_parent}
+		{ok, _Ref} -> {ok, Pid};
+		{error, parent} -> {error, dead_parent}
 	after 5000 -> {error, timeout} end.
-
-destroy(Chan) ->
-	case lists:keyfind({redq_chan, Chan}, 1, supervisor:which_children(?sup)) of
-		{{redq_chan, _} = ChildRef, undefined, _Type, _} ->
-			ok = supervisor:delete_child(?sup, ChildRef);
-
-		{{redq_chan, _} = ChildRef, Pid, _Type, _} ->
-			Ref = erlang:monitor(process, Pid),
-			Pid ! stop,
-
-			receive {'DOWN', Ref, process, _, _} ->
-				ok = supervisor:delete_child(?sup, ChildRef)
-			end;
-
-		false ->
-			{error, notfound}
-	end.
 
 id(Worker) ->
 	{M, S, Ms} = erlang:now(),
@@ -145,6 +125,10 @@ loop(Chan, Proxy, CSP, Rewrite) ->
 
 			loop(Chan, Proxy, CSP, Rewrite);
 
+		{'DOWN', _Ref, process, _Pid, _Reason} ->
+			CSP(),
+			redq_chan_manager:destroy(Chan);
+
 		stop ->
 			CSP(),
 			ok
@@ -207,7 +191,7 @@ kill_consumers_test_() ->
 		Children = [spawn(fun() ->
 				{ok, P} = redq_chan:new(<<N>>, [], self(), []),
 				Parent ! {N, P},
-				timer:sleep(5000)
+				receive terminate -> ok end
 			end) || N <- Consumers],
 
 		[receive {N, _P} -> ok end || N <- Consumers],
@@ -215,9 +199,11 @@ kill_consumers_test_() ->
 		?assertEqual(length(Children), length(supervisor:which_children(?sup))),
 		[begin
 			Ref = monitor(process, P),
-			S = exit(P, kill),
-			receive {'DOWN', Ref, process, R, killed} -> ok end
+			P ! terminate,
+			receive {'DOWN', Ref, process, _, R} -> ok end
 		 end || P <- Children],
+
+		timer:sleep(10),
 
 		?assertEqual([], supervisor:which_children(?sup))
 	end)}.
