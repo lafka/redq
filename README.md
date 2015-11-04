@@ -1,5 +1,7 @@
 # REDQ
 
+**Deprecated**: No longer use, there are plenty of other solutions (ExQ, Toniq, etc)
+
 Lightweight persistent queue system using Redis and Erlang.
 
 Features:
